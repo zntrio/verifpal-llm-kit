@@ -1,22 +1,57 @@
 # How Verifpal analyzes a model
 
 Verifpal is a **protocol analysis / bug-finding tool**, not a proof-producing verifier. It digests
-one protocol execution scenario enacted by explicit principals and tries to find contradictions to
+protocol execution scenarios enacted by explicit principals and tries to find contradictions to
 your queries. Understanding the engine tells you what a result means and how to get more insight.
 
 ## The verification pipeline
 
 1. **Parsing** — the `.vp` file becomes an AST (attacker, principals + expressions, messages,
-   phases, queries).
+   phases, scenarios, queries). Models given together are analyzed independently.
 2. **Sanity checking** — structural validation: phases sequential; every principal named in
-   messages/queries is declared; primitive arities match; `?` only on checkable primitives; every
-   equation rooted at `G`. (Full list in `grammar.md`.)
-3. **Construction** — the model becomes two internal representations:
+   messages/queries/scenarios is declared; primitive arities match; `?` only on the six checkable
+   primitives; capability brackets supported by the primitive; THRESHOLD/argument restrictions.
+   (Full list in `grammar.md`.)
+3. **Scenario expansion** — every declared scenario clones the whole model (principals and
+   messages) with the scenario's bindings substituted, and every clone is replicated once per
+   session (`--sessions`, see below). Scenario runs multiply with sessions.
+4. **Construction** — the expanded model becomes two internal representations:
    - a **protocol trace**: a global, immutable record of every constant's initial value, its
      creator, who knows it, and the phases it's communicated in;
    - a set of **principal states**: per-principal snapshots of each constant's resolved value plus
      metadata (received over the wire? guarded? who may mutate it?).
-4. **Verification** — the analysis engine runs, branching on attacker type.
+5. **Verification** — the analysis engine runs, branching on attacker type.
+
+## Scenarios and sessions
+
+- **Scenarios** (the optional `scenarios[ ... ]` block, directly before `queries`): each item is
+  a peer configuration — `Principal[target = value, …]` — and Verifpal clones every
+  principal/message per scenario, substituting the bindings in the named principal. A scenario
+  whose bound values are reachable from a `leaks` declaration is a **corrupt-peer run**: it is
+  analyzed (it is where the attacker learns things), but from the phase of that leak onward its
+  queries are **not claimed** and its checked primitives may fail without that being a model
+  error. Use scenarios when a protocol has more than one plausible peer instantiation (which key
+  did the participant actually use?).
+- **Sessions** (`verify --sessions N`, default **2**, range 1–16): every principal runs N
+  concurrent copies. Known (`knows`) values are **shared** across the copies; `generates` values
+  are **freshened** per copy. The attacker can carry values between concurrent runs — this is
+  what makes **replay attacks reachable**, and why authentication (injective agreement) fails on
+  replay across sessions, not just on forgery. At `--sessions 1` no sibling run exists, so no
+  replay can appear by construction. Verdicts are always relative to the session count: raise
+  `--sessions` to stress replay resistance.
+
+## Weakening assumptions in analysis
+
+A capability bracket (`AEAD_ENC[forgeable](…)`, `HASH[weak from phase 1](…)`,
+`ENC[malleable](…)`) is not documentation — it adds **attacker-owned rules** to the analysis:
+
+- `weak` gives the attacker the marked reveals when it holds the term (confidentiality loss),
+- `forgeable` lets it construct the term without the secret argument (authenticity loss),
+- `malleable` lets it retarget a ciphertext it already holds (bit-flipping shape),
+
+each optionally **delayed** by `from phase N` — in force from that phase onward only. Declared
+capabilities are collected across the model and applied wherever the annotated term (or an
+equivalent one) appears.
 
 ## The deductive analysis loop (fixed point)
 
@@ -24,15 +59,14 @@ Given attacker knowledge `VA` and a principal's state `VP`, three phases repeat 
 is derivable:
 
 1. **Decompose** — for each value in `VA`: *active* decomposition (know the required inputs, e.g.
-   the key → extract a hidden argument via the DECOMPOSE rule) and *passive* decomposition
-   (extract arguments the spec marks as passively revealed, e.g. `ad` in `AEAD_ENC`).
+   the key **and nonce** → extract a hidden argument via the DECOMPOSE rule) and *passive*
+   decomposition (extract arguments the spec marks as passively revealed, e.g. `CONCAT` inputs).
 2. **Reconstruct & Recompose** — for each value in `VP`: *reconstruct* (attacker has all
-   components → build the value, applied recursively with bounded depth, e.g. a DH shared secret
-   from known exponents) and *recompose* (attacker has enough outputs of a multi-output primitive
-   to recover an input, e.g. 2 of 3 Shamir shares).
-3. **Equivalize, Passwords, Concatenation** — recognize a `VP` value structurally equivalent to a
-   known one; extract a `password` value when the attacker can verify a guess (see below); pull
-   arguments out of values that reveal them.
+   components → build the value, applied recursively with bounded depth) and *recompose*
+   (attacker has enough outputs of a multi-output primitive to recover an input, e.g. `t` of the
+   `n` shares of a `THRESHOLD_SPLIT[t]`).
+3. **Equivalize, Concatenation** — recognize a `VP` value structurally equivalent to a known one;
+   pull arguments out of values that reveal them.
 
 Any new knowledge restarts from phase 1. When all three phases add nothing, the loop is at a
 **fixed point**. The loop is a **pure fixed-point computation** — it does *not* check queries or
@@ -59,9 +93,10 @@ Levels:
 
 - **Depth 0 (baseline)** — the unmodified execution (as in passive analysis).
 - **Depth 1 (single mutations)** — mutate each unguarded wire constant individually. All
-  attacker-known values are candidates, including `nil` for constants and `G^nil` for equations
-  (the attacker's own DH public key). This covers the canonical **DH man-in-the-middle** — replace
-  a received `G^b` with `G^nil` — as an ordinary first-order mutation, no special case.
+  attacker-known values are candidates, including `nil` for constants and `PUBKEY(nil)` for
+  public keys (the attacker's own public key, whose private half it holds). This covers the
+  canonical **DH man-in-the-middle** — replace a received `PUBKEY(b)` with `PUBKEY(nil)` — as an
+  ordinary first-order mutation, no special case.
 - **Depth 2 (pairs)** — pairs of simultaneous mutations plus injection nesting up to depth 1;
   constructed values must share the original's **skeleton** (see below).
 - **Depth 3 (triples)** — triples of mutations plus injection nesting up to depth 2.
@@ -75,11 +110,12 @@ knowledge is gained at a level (exhaustion).
 ### Skeleton-based injection
 
 To avoid combinatorial explosion, Verifpal filters candidate injections by **skeleton** — the
-primitive normalized with all "secret" parts erased (constants → `nil`, equations → `G`/`G^nil`),
-preserving function name, nesting depth, and per-argument type. A candidate must pass: (1)
-same cryptographic function, (2) nesting depth ≤ original, (3) a fast skeleton-hash match before
-the full structural comparison. This keeps injections structurally compatible with what the
-protocol expects.
+primitive normalized with all "secret" parts erased (constants → `nil`, public keys →
+`PUBKEY(nil)`), preserving function name, nesting depth, and per-argument type. A candidate must
+pass: (1) same cryptographic function, (2) nesting depth ≤ original, (3) a fast skeleton-hash
+match before the full structural comparison. This keeps injections structurally compatible with
+what the protocol expects. (In 0.52-era Verifpal skeletons normalized equations to `G`/`G^nil`;
+since equations are gone, public keys normalize through `PUBKEY` the same way.)
 
 ### Guard bypass
 
@@ -91,37 +127,20 @@ cascading guard failures.
 
 ### Preventing state-space explosion
 
-Bounded-depth search + explicit **budgets** (per-principal 80,000 mutation scans per depth;
-cross-product cap 50,000 combinations per variable subset; max 150 subsets per weight level) +
-early **exhaustion detection** + **skeleton filtering** + **parallelism** (depth levels ≥2 run
-concurrently) + **bounded arity** (≤5 in/out). Unlike ProVerif (sound over unbounded sessions via
+Bounded-depth search + explicit **budgets** + early **exhaustion detection** + **skeleton
+filtering** + **parallelism** (depth levels ≥2 run concurrently) + **bounded arity** (≤5 in/out,
+threshold families capped at 16 shares). Unlike ProVerif (sound over unbounded sessions via
 over-approximation, at the cost of possible non-termination), Verifpal's bounded search always
 terminates quickly while covering practically-arising attacks.
-
-## Password extraction
-
-A `password`-qualified constant at position `i` of a primitive `P(a0…an)` known to the attacker is
-recoverable iff: (1) position `i` is **not** in `P`'s `password_hashing` list (only `PW_HASH` has a
-non-empty one, covering all positions — so `PW_HASH(pwd)` is always safe), **and** (2) the attacker
-knows every sibling argument `a_j` (`j ≠ i`). Condition 2 is the offline verification oracle: to
-confirm a guess the attacker recomputes the primitive with the guess and compares. Both conditions
-are checked at every nesting level. Examples:
-
-- `ENC(pwd, secret)` — attacker lacks `secret`; can't verify a guess → **safe**.
-- `ENC(pwd, pubdata)` — attacker knows `pubdata`; brute-forces `ENC(guess, pubdata)` →
-  **obtainable**.
-- `ENC(key, CONCAT(pwd, data))` — needs `data` (at CONCAT) *and* `key` (at ENC); either unknown →
-  **safe**.
-- `PW_HASH(pwd)` — protected by condition 1 → **safe**.
-
-Because this runs inside the fixed-point loop, a password may become extractable later once a
-sibling is learned by decomposition/reconstruction (cascading attacks).
 
 ## Provenance and value resolution
 
 Every value carries a **provenance** record: `creator` (who declared/generated it), `sender` (who
-sent it), `attacker_tainted` (did the attacker tamper). If the active attacker replaces `m` on the
-wire, `sender` becomes the attacker and `m` is tainted. Authentication queries read this record.
+sent it), `attacker_tainted` (did the attacker tamper). If the active attacker replaces `m` on
+the wire, `sender` becomes the attacker and `m` is tainted. Authentication queries read this
+record — and, since authentication is **injective agreement**, they also read *which session* the
+send belongs to: a value honestly sent in session 1 and accepted in session 2 is a replay
+contradiction.
 
 Each state slot tracks three versions: `original` (before tampering), `pre_rewrite` (after
 mutation, before rewrites), `value` (final, after both). When resolving nested expressions,
@@ -132,21 +151,22 @@ received over a wire; it uses the attacker's `value` **only** for values receive
 ## Soundness and completeness — the precise boundary
 
 **Guarantees (sound attack-finding):** every reported contradiction is a genuine logical
-consequence of the model — no fabricated attacks. The printed trace is a real witness. Specifically:
-a contradicted confidentiality query means the attacker legitimately derived the value; a
-contradicted authentication query means an execution where the recipient uses the value but its
-sender ≠ the claimed sender; a contradicted equivalence query means an execution where the values
-resolve to distinct terms.
+consequence of the model — no fabricated attacks. The printed trace is a real witness.
+Specifically: a contradicted confidentiality query means the attacker legitimately derived the
+value; a contradicted authentication query means an execution where the recipient uses the value
+but its sender is not the claimed sender *in that session* (forgery or replay); a contradicted
+equivalence query means an execution where the values resolve to distinct terms.
 
 **Does NOT guarantee:**
 
 - **Verification completeness** — no reported attack is *not* a proof of security; the bounded
   search may miss the mutation combination that reveals a flaw. Bug-finder, not prover.
-- **Unbounded sessions** — one scenario (one trace + attacker mutations), not arbitrarily many
-  interleaved concurrent sessions. Attacks needing session interleaving / session-id confusion are
-  out of scope.
+- **Unbounded sessions** — sessions are bounded (`--sessions`, at most 16); attacks needing more
+  concurrent interleavings than analyzed are out of scope. Verdicts are relative to the session
+  count.
 - **Computational soundness** — symbolic model; concrete crypto weaknesses (padding oracles,
-  timing side channels, weak RNG, key lengths, cipher modes) are not modelled.
+  timing side channels, weak RNG, key lengths, cipher modes) are not modelled — declare a
+  **capability** (`weak`/`forgeable`/`malleable`) to weaken a primitive symbolically instead.
 
 The incompleteness comes from the bounded choice of *which mutations to try*, not from the
 deduction within an execution (which is locally complete). In practice the default depth 3 finds

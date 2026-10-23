@@ -13,14 +13,18 @@ questions, then draft, then refine.
 1. **Use case & adversary.** What is this protocol *for*, and who is the attacker? On-path
    (active) is the default; only a genuinely no-active-attacker setting justifies `passive`.
 2. **Principals & roles.** Who participates? For each: what do they **know before the session**
-   (public? truly private? a weak human password?) and what do they **generate fresh** each run
-   (ephemeral keys, nonces)?
+   (public? truly private?) and what do they **generate fresh** each run (ephemeral keys,
+   nonces)?
 3. **The message flow.** Walk one concrete run end to end: who sends what to whom, in order. Draw
    it as `Sender -> Recipient: values`. If the protocol can go several ways, pick **one** run now;
    note the others as future models.
 4. **The operations.** For each value a principal computes, which cryptographic operation produces
    it? Map it to a built-in primitive (verifpal-lang primitive table). If they describe something
    with no built-in equivalent, find the closest abstraction — you cannot define new primitives.
+   If they describe crypto that is *weaker* than ideal ("it's basically a hash but the output
+   leaks", "the cipher can be tampered"), that is a **weakening assumption** (`[weak]`,
+   `[forgeable]`, `[malleable]`) on the primitive — the way to model "the crypto is weaker than
+   ideal" ideas.
 5. **Security goals.** For each sensitive value: secret from the attacker? authenticated as coming
    from a specific party? fresh/non-replayable? forward-secret after a later key compromise? These
    become the queries.

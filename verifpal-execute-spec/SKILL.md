@@ -90,7 +90,7 @@ For non-trivial changes, produce a compact gap analysis. Do not read the whole c
 focused summary under ~300 lines. Answer:
 
 1. For each **principal** in the model, where is its state/keys managed in code?
-2. For each **assignment** (primitive/equation) in the model, which function(s) perform it?
+2. For each **assignment** (primitive) in the model, which function(s) perform it?
 3. For each **checked** primitive (`?`) and **guarded** constant (`[ ]`) in the model, where does
    the code enforce the corresponding validation / pinning? (Missing enforcement is a live gap.)
 4. Which model behaviors have **no** code counterpart (gaps)? Which code behaviors are **not** in
@@ -160,7 +160,13 @@ Re-run the full model and confirm results against intent:
 - **Every documented expected attack is still reported under its stated condition.** If an
   intended contradiction *disappeared*, the change altered protocol behavior (possibly fine, but it
   is a model change — get it approved and update the note).
-- Read any new `Result` trace step by step; a `G^nil` in it is a man-in-the-middle fingerprint.
+- Read any new `Result` trace step by step; a `PUBKEY(nil)` in it is a man-in-the-middle
+  fingerprint (the attacker's own public key).
+
+For comparing runs mechanically: `verifpal verify model.vp --result-code --quiet | tail -1` prints
+the compact code (one `c`/`a`/`f`/`u`/`e` letter + `0`/`1` digit per query, in model order) —
+diff it against the documented intended code before and after each change. `--format json`
+gives the full structured verdicts for scripted consumption.
 
 If results diverge from intent and the model itself is genuinely wrong, present the proposed model
 change to the user — do not just edit it.

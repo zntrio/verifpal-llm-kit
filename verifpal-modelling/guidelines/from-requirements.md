@@ -25,8 +25,9 @@ Read the document and pull out, with a page/section citation for each:
    without a resumption ticket) — model each variant separately.
 4. **Cryptographic operations.** Map each computation to a built-in primitive. Key derivation
    chains (HKDF ladders, transcript hashes) → `HKDF`/`HASH`; AEAD with a transcript as associated
-   data → `AEAD_ENC(k, m, ad)`; signatures over a transcript → `SIGN`/`SIGNVERIF`. Preserve the
-   *structure* (what's mixed into each key) even while abstracting the concrete algorithm.
+   data → `AEAD_ENC(k, nonce, m, ad)`; signatures over a transcript → `SIGN`/`SIGNVERIF`
+   (under `PUBKEY(key)`). Preserve the *structure* (what's mixed into each key) even while
+   abstracting the concrete algorithm.
 5. **Stated security goals.** The doc's claimed properties (confidentiality, mutual auth, forward
    secrecy, identity hiding, KCI resistance, replay resistance) → the queries. This is the
    highest-value extraction: you are checking the doc's *own claims*.

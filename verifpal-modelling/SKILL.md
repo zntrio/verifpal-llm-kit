@@ -22,7 +22,7 @@ skill owns the **modelling discipline** (below) and **routes** to a flow-specifi
 the intake — turning a particular kind of input (an idea, a requirements doc, source code, or an
 existing model to audit) into the understanding the shared steps build on.
 
-For language syntax, the built-in primitives, the equational theory, the CLI, and how the analysis
+For language syntax, the built-in primitives, the rewrite theory, the CLI, and how the analysis
 engine works, defer to the **verifpal-lang** reference. This skill is about *how to model and
 analyze*, not Verifpal syntax.
 
@@ -69,11 +69,13 @@ source is authoritative before picking — the intake differs materially.
 
 ### Reference examples
 
-Four complete, analyzable models are bundled in `examples/`, ordered by complexity. Read the
+Five complete, analyzable models are bundled in `examples/`, ordered by complexity. Read the
 closest structural match as a worked instance of the spine — see `examples/README.md` for the
-selection table. In short: `challenge-response.vp` (smallest — teaches checks + guards),
-`signal.vp` (two-party session, ratchet, forward secrecy via phases), `scuttlebutt.vp` (adds a
-pre-shared symmetric key), `dp-3t.vp` (multi-party, time-staged).
+selection table. In short: `simple.vp` (smallest — unauthenticated DH, teaches guards + what a
+man-in-the-middle looks like), `signal.vp` (two-party session, ratchet, forward secrecy via
+phases), `scuttlebutt.vp` (pre-shared symmetric key alongside public keys), `dp-3t.vp`
+(multi-party, time-staged), `hpke-base.vp` (RFC 9180 KEM/key-schedule modeling, intentional
+authentication failure).
 
 ---
 
@@ -90,7 +92,7 @@ Before any syntax, answer three questions (the intake guideline fills these from
 | Concern | Questions |
 |---|---|
 | **Use case & threat model** | What is the protocol for? Is there an on-path adversary? → almost always `attacker[active]`; use `attacker[passive]` only for genuinely no-active-attacker settings (air-gapped, cleared operators). |
-| **Principals & roles** | Who are the parties (Alice, Bob, Server, Client, Smartphone…)? What does each **know** ahead of time (public? private? a weak password?) and **generate** fresh per session? |
+| **Principals & roles** | Who are the parties (Alice, Bob, Server, Client, Smartphone…)? What does each **know** ahead of time (public? private?) and **generate** fresh per session? |
 | **Security goals** | For each sensitive value: confidentiality? authentication (who must have sent it)? freshness / replay resistance? unlinkability? forward secrecy / post-compromise? These become the `queries[ ]` block — decide them **now**, they drive the whole model. |
 
 > **Be honest about `private`.** A value is only as secret as reality allows. Marking a
@@ -111,34 +113,37 @@ principal Alice[
 	knows public c0
 	knows private m1
 	generates a
-	ga = G^a
+	ga = PUBKEY(a)
 ]
 ```
 
 Use `knows public` for anything the attacker also has, `knows private` for genuine secrets,
-`knows password` for low-entropy secrets (and remember to `PW_HASH` them before use), `generates`
-for per-session freshness (ephemeral keys, nonces — the basis of forward secrecy). A principal can
-be declared across **multiple blocks**; state accumulates. Get the knowledge right first — typecheck
-by running `verifpal verify` on this skeleton before adding operations.
+`generates` for per-session freshness (ephemeral keys, nonces — the basis of forward secrecy). A
+principal can be declared across **multiple blocks**; state accumulates. Get the knowledge right
+first — typecheck by running `verifpal verify` on this skeleton before adding operations.
+
 
 ### Step 3 — Model each principal's operations (assignments)
 
-Translate each protocol computation into an **assignment** to a built-in primitive or equation —
-never invent crypto, use verifpal-lang's primitive table. Model the operation's *effect*, not its
+Translate each protocol computation into an **assignment** to a built-in primitive — never
+invent crypto, use verifpal-lang's primitive table. Model the operation's *effect*, not its
 implementation:
 
 ```verifpal
 principal Bob[
-	generates b
-	gb = G^b                              // DH public key (equation, rooted at G)
-	ss = ga^b                             // DH shared secret
-	e1 = AEAD_ENC(ss, m1, gb)             // authenticated encryption; gb as associated data
+	generates b, nb
+	gb = PUBKEY(b)                     // DH public key from the private value
+	ss = DH_KEX(ga, b)                 // DH shared secret (commutative with DH_KEX(gb, a))
+	e1 = AEAD_ENC(ss, nb, m1, gb)      // authenticated encryption; nonce 2nd, gb as associated data
 ]
 ```
 
-Multi-output primitives bind several constants: `k1, k2 = HKDF(salt, ikm, info)`. Keep to small
-key schedules that capture the real key-derivation structure. Run `verifpal verify` after each
-principal — a sanity/arity error surfaces immediately.
+Multi-output primitives bind several constants: `k1, k2 = HKDF(salt, ikm, info)`; the KEM binds
+two: `ss, ct = KEM_ENCAP(PUBKEY(dk), r)`. Keep to small key schedules that capture the real
+key-derivation structure. Run `verifpal verify` after each principal — a sanity/arity error
+surfaces immediately. If the protocol's crypto is *weaker* than the ideal primitive, declare a
+**weakening assumption** on the instance (`AEAD_ENC[forgeable](…)`, `ENC[malleable](…)`,
+`HASH[weak from phase 1](…)`) rather than inventing a primitive.
 
 ### Step 4 — Model the messages, and decide guards deliberately
 
@@ -157,12 +162,11 @@ faithful and more revealing model. Plan to analyze **both**.
 
 ### Step 5 — Decide which primitives are checked
 
-Suffix `?` on a checkable primitive (`AEAD_DEC`, `SIGNVERIF`, `ASSERT`, `SPLIT`, `RINGSIGNVERIF`,
-`DEC`, `PKE_DEC`, `UNBLIND`) to make the session **abort** if its rewrite fails:
-
+Suffix `?` on a checkable primitive — the checkable set is exactly **six**: `ASSERT`, `SPLIT`,
+`AEAD_DEC`, `SIGNVERIF`, `RINGSIGNVERIF`, `KEM_DECAP` — to make the session **abort** if its
+rewrite fails:
 ```verifpal
-valid = SIGNVERIF(gb, m, sig)?
-p = AEAD_DEC(k, c, ad)?
+p = AEAD_DEC(k, n, c, ad)?
 ```
 
 Checking models an implementation that validates; **authentication queries depend on it** (an
@@ -199,23 +203,33 @@ queries[
 ]
 ```
 
-Each query type's exact contradiction condition is in verifpal-lang `guidelines/queries.md`. Query
-authentication only on values the recipient actually **uses in a (checked) primitive** — otherwise
-the result is vacuous.
+Each query type's exact contradiction condition is in verifpal-lang `guidelines/queries.md`.
+Query authentication only on values the recipient actually **uses in a (checked) primitive** —
+otherwise the result is vacuous. If the protocol has more than one plausible peer
+configuration (which key did the participant bind to?), add the optional `scenarios[ ... ]`
+block directly before `queries` — one `Principal[target = value, …]` item per peer — and
+Verifpal analyzes each cloned run, including corrupt-peer scenarios where a bound value is
+reachable from a `leaks` declaration.
+
 
 ### Step 8 — Analyze, then tweak and re-analyze
 
-Run `verifpal verify model.vp`. Read every `Result` line as a concrete attack witness (a `G^nil`
-in the trace is the attacker's crafted DH key — a man-in-the-middle fingerprint). A clean run
-means "no contradicting scenario found in the bounded search," **not** a proof.
+Run `verifpal verify model.vp`. Read every `Result` line as a concrete attack witness (a
+`PUBKEY(nil)` in the trace is the attacker's crafted public key — a man-in-the-middle
+fingerprint). A clean run means "no contradicting scenario found in the bounded search,"
+**not** a proof.
 
 Then do the thing Verifpal is *for*: **tweak and re-run.** Systematically flip the knobs from Steps
 4–6 and observe how results change:
 
 - unguard a public key → expect a man-in-the-middle
 - uncheck a `SIGNVERIF`/`AEAD_DEC` → expect impersonation / acceptance of forged values
-- make a `private`/`password` constant `public` → test the pre-shared-secret assumption
+- make a `private` constant `public` → test the pre-shared-secret assumption
 - add a `phase[1]` leak → test forward secrecy
+- flip a capability (`AEAD_ENC[forgeable]`, `ENC[malleable]`, `HASH[weak]`) → test what happens
+  when the crypto is weaker than ideal
+- raise `--sessions` (default 2, up to 16) → stress replay; a query that holds at one session
+  may break at two
 
 Each contrast is a finding. Record which configuration achieves which goal — that mapping is the
 deliverable, not a single green run.
@@ -247,15 +261,16 @@ stops the model from being over-trusted.
 
 - **Names:** `Alice`/`Bob` for peers, `Client`/`Server`, descriptive role names (`SmartphoneA`,
   `BackendServer`, `HealthCareAuthority`). Long-term keys `along term`/`blongterm` style; ephemeral
-  `ae1`, `be`; public keys prefixed `g` (`ga = G^a`); shared secrets `ss`/`kshared`; ciphertexts
-  `e1`, `secretBox…`.
-- **`G` and `nil`** are reserved: `G` the DH generator, `nil` the public empty constant (and the
-  attacker's `G^nil` key). Don't redeclare them.
+  `ae1`, `be`; public keys via `PUBKEY`, still naturally named with a `g` prefix (`ga = PUBKEY(a)`);
+  shared secrets via `DH_KEX`, named `ss`/`kshared`; ciphertexts `e1`, `secretBox…`.
+- **Reserved names:** `nil` (the public empty value — and the attacker's `PUBKEY(nil)` crafted
+  key), `g`, `unnamed`-prefixed and `attacker`-prefixed names, all keywords and primitive names.
+  Don't redeclare them.
 - **Abstraction:** opaque IDs, no string manipulation, `HASH`/`HKDF` for key schedules, `CONCAT`
   for structured payloads. Don't model wire formats.
 - **Scenario size:** two or three principals and a handful of messages capture most goals and keep
   analysis fast. Model one message flow first, analyze, then extend.
 
-For everything syntactic — the full primitive list, arities, the equational theory, the CLI,
+For everything syntactic — the full primitive list, arities, the rewrite theory, the CLI,
 result output, the grammar — consult the **verifpal-lang** reference rather than reproducing it
 here.

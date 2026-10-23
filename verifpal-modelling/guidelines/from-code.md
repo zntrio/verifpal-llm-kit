@@ -30,9 +30,12 @@ Verifpal's scope (verifpal-lang `guidelines/analysis.md`).
    computes it, and from what inputs? That fixes which `principal[ ]` block the assignment lands
    in and what that principal must `knows`/`generates` first.
 3. **Classify key material honestly.** Long-term identity keys → `knows private` + published
-   `G^k`. Per-connection ephemerals → `generates`. Anything hardcoded/embedded → be skeptical of
-   `private` (see the "Are you sure it's private?" caution); if the code ships the secret in the
-   binary, it may not be private at all.
+   `PUBKEY(k)`. Per-connection ephemerals → `generates`. Anything hardcoded/embedded → be
+   skeptical of `private` (see the "Are you sure it's private?" caution); if the code ships the
+   secret in the binary, it may not be private at all. If the code's crypto is deliberately
+   weaker than ideal (a forgeable tag, a tamperable ciphertext, a leaky hash), model that with a
+   **weakening assumption** (`[forgeable]`, `[malleable]`, `[weak]`) — not by inventing a
+   primitive.
 4. **Read the message boundary.** Where the code writes to / reads from the socket is a
    `Sender -> Recipient` line. Only the constants crossing there go in the message.
 5. **Capture the checks.** Every place the code *verifies before continuing* (checks a tag, a
@@ -40,6 +43,12 @@ Verifpal's scope (verifpal-lang `guidelines/analysis.md`).
    if the code **skips** a check (accepts without verifying), model it **unchecked** — that
    faithfully represents the implementation and may be exactly the bug. Do not "fix" the code's
    omission in the model.
+
+   A **nonce-reuse bug in the code** is directly expressible: `AEAD_ENC` takes the nonce as
+   its second argument, so model two encryptions under the same key and the same `nonce` value
+   with differing plaintext or `ad` — the reuse attack (learn the other plaintext, forge under
+   that key+nonce) appears in the analysis automatically. (Conversely, a *correctly* unique
+   nonce is a `generates` value fed into each call.)
 6. **Locate pre-authentication.** If the code pins or pre-loads a peer's public key (certificate
    pinning, a trusted-keys file), that value is **guarded** on the wire. If it accepts whatever
    arrives, leave it **unguarded**.

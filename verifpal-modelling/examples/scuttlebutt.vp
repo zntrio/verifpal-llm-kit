@@ -1,54 +1,90 @@
-// Secure Scuttlebutt authenticated key exchange. (Manual ch. 6.)
+// SPDX-FileCopyrightText: © 2019-2026 Nadim Kobeissi <nadim@symbolic.software>
+// SPDX-License-Identifier: GPL-3.0-only
 //
-// Read this when a protocol has a PRE-SHARED SYMMETRIC KEY as well as public keys.
-// Here `n` (the "network identifier") is a private pre-known symmetric value shared by
-// Alice and Bob but not the attacker — it acts as a PSK woven into every derived key.
-// Contrast with Signal, where authentication rests on guarded public keys alone.
+// Expected: c1c0c1c0a1a1a1a1a1e1 at one session and at two.
 //
-// Security goals modelled: initiator identity hiding (longTermAPub stays secret),
-// message confidentiality, network-identifier hiding, forward secrecy.
+// Secure Scuttlebutt's "Secret Handshake" — the mutual-authentication key
+// exchange used by the SSB peer-to-peer social network. Alice (client)
+// connects to Bob (server), whose identity key she already knows; her own
+// identity is revealed to Bob only inside the encrypted channel.
 //
-// ANALYZED with verifpal 0.52.0 (see examples/README.md "Validation"):
-//   - confidentiality? m1, m2, longTermAPub  -> PASS  (messages secret AND initiator identity
-//     hidden — the network identifier n acts as a PSK, exactly as the manual describes)
-//   - authentication? (all five)  -> reported as CONTRADICTIONS by 0.52.0, via cross-session
-//     replay ("In another session:" in the trace). The manual's prose reports the initial
-//     model clean; that narrative predates the engine redesign the manual's Notes mention.
-//     Verifpal authentication is non-injective and the active attacker runs unbounded sessions
-//     (verifpal-lang guidelines/{queries,analysis}.md), so replay-style auth contradictions are
-//     expected here — a faithful demonstration of that boundary.
-// Experiments the manual walks through (still instructive to run):
-//   - make n public  -> confidentiality of longTermAPub ALSO collapses; the PSK was load-bearing
-//   - leak longTermA after m1 (keep n private)  -> messages stay secret: forward secrecy holds
+// The threat model matters more than the message flow here. Secret
+// Handshake's network key `n` (a MAC key on the ephemerals) is what keeps
+// outsiders off an SSB network — and this model declares it `knows public`,
+// making the attacker a fully paid-up member of the network. The verdict
+// (c1c0c1c0a1a1a1a1a1e1) then splits along a sharp line:
 //
-// NOTE: `null` here is an ordinary public constant used as AEAD associated data, not a
-// keyword. `n` being both "known to all users" yet "unknown to the attacker" is an
-// idealization the manual flags as debatable — a good lesson in the "Are You Sure It's
-// Private?" caution.
+//  What survives a malicious fellow peer:
+//   confidentiality? m1            HOLDS — Alice knows who she is talking
+//     to: longTermBPub reaches her guarded, and she verifies Bob's
+//     signature before sending. Her message is for Bob and stays with Bob.
+//   confidentiality? longTermAPub  HOLDS — identity hiding: Alice's public
+//     key travels only inside secretBox2Alice, so a network observer
+//     cannot learn WHO connected to Bob. (Yes, a confidentiality query on
+//     a "public" key: the point is whether it can be observed in transit.)
+//
+//  What does not:
+//   confidentiality? n             FAILS trivially — it is declared public;
+//     the query documents the assumption rather than testing one.
+//   confidentiality? m2            FAILS — the structural weakness. Bob
+//     learns "Alice's" identity FROM the handshake itself (it arrives in
+//     secretBox2Alice) and checks it against nothing he knew beforehand,
+//     so nothing stops a member attacker from completing the handshake in
+//     the client role — after which Bob's reply is addressed to it.
+//   authentication? (all five) FAIL — same root cause, compounded by the
+//     boxes being AEADs under hash-derived keys with no signature over the
+//     later ones: a member attacker can get Bob to accept boxes it authored,
+//     and several traces splice in material recorded from the other
+//     concurrent session. (Some of these witnesses reproduce only because
+//     parallel sessions share the model's ephemerals; the m2 story above
+//     does not need that crutch.)
+//   authentication? Bob -> Alice: secretBox1Bob  FAILS by reflection, even
+//     at one session. Alice derives her master secret through Bob's guarded
+//     long-term key, so the only ciphertexts that open under it are Bob's:
+//     secretBox1Bob and secretBoxM2Bob. The second needs a reply from
+//     "Alice", and the attacker supplies one by handing Bob his own
+//     secretBox1Bob back as her secretBoxM1Alice: both directions use the
+//     same master secret and no associated data, so Bob opens it and answers
+//     with secretBoxM2Bob, which Alice then opens as her secretBox1Bob. At
+//     two sessions Bob#2 can play the same part. The server-authentication
+//     half survives everything except this reflection of Bob's own box.
+//
+// The honest reading: Secret Handshake authenticates the SERVER to the
+// client and hides identities from OUTSIDERS; a client identity is
+// something the server learns, not something it verifies against an
+// expectation. Within SSB that is by design (any member may connect, and
+// authorization happens above this layer) — the failing queries map that
+// boundary precisely. Exercise: model an outsider attacker by changing
+// `knows public n` to `knows private n` in all three principals, and watch
+// the picture change.
 
 attacker[active]
 
 principal Alice[
-	knows public null
-	knows private n
+	// The SSB network key, deliberately public here — see the header.
+	knows public n
 	knows private longTermA
 	generates ephemeralA
-	longTermAPub = G^longTermA
-	ephemeralAPub = G^ephemeralA
+	longTermAPub = PUBKEY(longTermA)
+	ephemeralAPub = PUBKEY(ephemeralA)
 ]
 
 principal Bob[
-	knows public null
-	knows private n
+	knows public n
 	knows private longTermB
 	generates ephemeralB
-	longTermBPub = G^longTermB
-	ephemeralBPub = G^ephemeralB
+	longTermBPub = PUBKEY(longTermB)
+	ephemeralBPub = PUBKEY(ephemeralB)
 ]
 
+// Guarded: Alice knows Bob's identity key in advance (in SSB you dial a
+// peer BY its public key). This anchor is why Alice's side holds.
 Bob -> Alice: [longTermBPub]
 
 principal Alice[
+	// Hello: the ephemeral, MAC'd under the network key. With n public
+	// this MAC gates nothing against a member; against an outsider it
+	// would prove network membership.
 	nMacAlice = MAC(n, ephemeralAPub)
 ]
 
@@ -63,58 +99,83 @@ Bob -> Alice: ephemeralBPub, nMacBob
 
 principal Alice[
 	nMacBobValid = ASSERT(MAC(n, ephemeralBPub), nMacBob)?
-	ephemeralSecretAlice = ephemeralBPub^ephemeralA
-	longTermSecretAlice = longTermBPub^ephemeralA
+	// The layered shared secrets of Secret Handshake: ephemeral-ephemeral
+	// first, then ephemeral against Bob's identity key (proving to Alice
+	// that only Bob can follow along).
+	ephemeralSecretAlice = DH_KEX(ephemeralBPub, ephemeralA)
+	longTermSecretAlice = DH_KEX(longTermBPub, ephemeralA)
 	masterSecret1Alice = HASH(n, ephemeralSecretAlice, longTermSecretAlice)
+	// Alice proves her identity: a signature naming Bob and the session,
+	// sent encrypted so outsiders never see who she is —
 	sig1Alice = SIGN(longTermA, HASH(n, longTermBPub, ephemeralSecretAlice))
-	secretBox1Alice = AEAD_ENC(masterSecret1Alice, sig1Alice, null)
-	secretBox2Alice = AEAD_ENC(masterSecret1Alice, longTermAPub, null)
-	longEphemeralSecretAlice = ephemeralBPub^longTermA
+	generates n_secretBox1Alice
+	secretBox1Alice = AEAD_ENC(masterSecret1Alice, n_secretBox1Alice, sig1Alice, nil)
+	// — and her public key, boxed for the same reason (identity hiding).
+	generates n_secretBox2Alice
+	secretBox2Alice = AEAD_ENC(masterSecret1Alice, n_secretBox2Alice, longTermAPub, nil)
+	// Third secret: Alice's identity key against Bob's ephemeral, folded
+	// into the final master secret both directions of traffic will use.
+	longEphemeralSecretAlice = DH_KEX(ephemeralBPub, longTermA)
 	masterSecret2Alice = HASH(n, ephemeralSecretAlice, longTermSecretAlice, longEphemeralSecretAlice)
 ]
 
-Alice -> Bob: secretBox1Alice, secretBox2Alice
+Alice -> Bob: n_secretBox1Alice, secretBox1Alice, n_secretBox2Alice, secretBox2Alice
 
 principal Bob[
-	ephemeralSecretBob = ephemeralAPub^ephemeralB
-	longTermSecretBob = ephemeralAPub^longTermB
+	ephemeralSecretBob = DH_KEX(ephemeralAPub, ephemeralB)
+	longTermSecretBob = DH_KEX(ephemeralAPub, longTermB)
 	masterSecret1Bob = HASH(n, ephemeralSecretBob, longTermSecretBob)
-	sig1Bob = AEAD_DEC(masterSecret1Bob, secretBox1Alice, null)?
-	longTermAPub_Bob = AEAD_DEC(masterSecret1Bob, secretBox2Alice, null)?
-	sig1Valid = SIGNVERIF(longTermAPub_Bob, HASH(n, longTermBPub, ephemeralSecretBob), sig1Bob)?
-	longEphemeralSecretBob = longTermAPub_Bob^ephemeralB
+	sig1Bob = AEAD_DEC(masterSecret1Bob, n_secretBox1Alice, secretBox1Alice, nil)?
+	// Here is the crux: Bob takes the client's identity OUT OF THE BOX
+	// and verifies the signature against that very key. The signature is
+	// internally consistent by construction, whoever the client is —
+	// Bob holds no prior expectation to compare longTermAPub_Bob against.
+	longTermAPub_Bob = AEAD_DEC(masterSecret1Bob, n_secretBox2Alice, secretBox2Alice, nil)?
+	sig1Valid = SIGNVERIF(longTermAPub_bob, HASH(n, longTermBPub, ephemeralSecretBob), sig1Bob)?
+	longEphemeralSecretBob = DH_KEX(longTermAPub_Bob, ephemeralB)
 ]
 
 principal Bob[
+	// Bob's acceptance: a signature over the session transcript, boxed
+	// under the final master secret. For Alice, who KNOWS Bob's key, this
+	// is a real guarantee — it is what keeps m1 confidential.
 	sig2Bob = SIGN(longTermB, HASH(n, sig1Bob, longTermAPub_Bob, ephemeralSecretBob))
 	masterSecret2Bob = HASH(n, ephemeralSecretBob, longTermSecretBob, longEphemeralSecretBob)
-	secretBox1Bob = AEAD_ENC(masterSecret2Bob, sig2Bob, null)
+	generates n_secretBox1Bob
+	secretBox1Bob = AEAD_ENC(masterSecret2Bob, n_secretBox1Bob, sig2Bob, nil)
 ]
 
-Bob -> Alice: secretBox1Bob
+Bob -> Alice: n_secretBox1Bob, secretBox1Bob
 
 principal Alice[
 	knows private m1
-	sig2Alice = AEAD_DEC(masterSecret2Alice, secretBox1Bob, null)?
+	sig2Alice = AEAD_DEC(masterSecret2Alice, n_secretBox1Bob, secretBox1Bob, nil)?
+	// Alice's checked verification of Bob's acceptance, against the
+	// guarded longTermBPub — her side of the handshake is fully anchored.
 	sig2Valid = SIGNVERIF(longTermBPub, HASH(n, sig1Alice, longTermAPub, ephemeralSecretAlice), sig2Alice)?
-	secretBoxM1Alice = AEAD_ENC(masterSecret2Alice, m1, null)
+	generates n_secretBoxM1Alice
+	secretBoxM1Alice = AEAD_ENC(masterSecret2Alice, n_secretBoxM1Alice, m1, nil)
 ]
 
-Alice -> Bob: secretBoxM1Alice
+Alice -> Bob: n_secretBoxM1Alice, secretBoxM1Alice
 
 principal Bob[
 	knows private m2
-	m1Bob = AEAD_DEC(masterSecret2Bob, secretBoxM1Alice, null)?
-	secretBoxM2Bob = AEAD_ENC(masterSecret2Bob, m2, null)
+	m1Bob = AEAD_DEC(masterSecret2Bob, n_secretBoxM1Alice, secretBoxM1Alice, nil)?
+	// Bob's reply — encrypted to whoever completed the handshake with
+	// him, which a member attacker can be. This is why m2 falls.
+	generates n_secretBoxM2Bob
+	secretBoxM2Bob = AEAD_ENC(masterSecret2Bob, n_secretBoxM2Bob, m2, nil)
 ]
 
-Bob -> Alice: secretBoxM2Bob
+Bob -> Alice: n_secretBoxM2Bob, secretBoxM2Bob
 
-principal Alice[
-	m2Alice = AEAD_DEC(masterSecret2Alice, secretBoxM2Bob, null)?
+principal Alice [
+	m2Alice = AEAD_DEC(masterSecret2Alice, n_secretBoxM2Bob, secretBoxM2Bob, nil)?
 ]
 
 queries[
+	confidentiality? n
 	confidentiality? m1
 	confidentiality? m2
 	confidentiality? longTermAPub
@@ -123,4 +184,5 @@ queries[
 	authentication? Bob -> Alice: secretBox1Bob
 	authentication? Alice -> Bob: secretBoxM1Alice
 	authentication? Bob -> Alice: secretBoxM2Bob
+	equivalence? masterSecret2Alice, masterSecret2Bob
 ]
