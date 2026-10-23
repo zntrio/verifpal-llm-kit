@@ -1,0 +1,54 @@
+// Challenge-Response — the smallest complete Verifpal model that teaches the
+// two most important active-attacker defenses: CHECKED primitives and GUARDED
+// constants. (Manual §3.5.)
+//
+// Goal: Client challenges Server to prove ownership of signing key pair (s, gs = G^s)
+// by signing a fresh nonce. Server then asks Client to attest with its own key.
+//
+// This is the CORRECTED model. The manual first shows it WITHOUT the two fixes and
+// asks you to find the bug:
+//   1. `valid = SIGNVERIF(gs, nonce, proof)` was UNCHECKED — Client sent `valid`
+//      whether or not verification passed. Adding `?` aborts the session on failure.
+//   2. `gs` was sent UNGUARDED — an active attacker replaces gs=G^s with gs=G^a_0
+//      (attacker key a_0), a mayor-in-the-middle. Guarding gs (pre-authentication)
+//      makes it un-substitutable.
+// Try deleting the `?` or the `[ ]` around gs and re-running to see the attacks appear.
+
+attacker[active]
+
+principal Server[
+	knows private s
+	gs = G^s
+]
+
+principal Client[
+	knows private c
+	gc = G^c
+	generates nonce
+]
+
+Client -> Server: nonce
+
+principal Server[
+	proof = SIGN(s, nonce)
+]
+
+// gs is GUARDED: Client has pre-authenticated Server's signing public key.
+Server -> Client: [gs], proof
+
+principal Client[
+	valid = SIGNVERIF(gs, nonce, proof)?   // CHECKED: abort if the signature does not verify
+	generates attestation
+	signed = SIGN(c, attestation)
+]
+
+Client -> Server: [gc], attestation, signed
+
+principal Server[
+	storage = SIGNVERIF(gc, attestation, signed)?
+]
+
+queries[
+	authentication? Server -> Client: proof
+	authentication? Client -> Server: signed
+]

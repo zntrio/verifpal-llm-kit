@@ -1,0 +1,117 @@
+// DP-3T decentralized contact tracing. (Manual ch. 7, contributed by Georgio Nicolas.)
+//
+// Read this when modelling a MULTI-PARTY protocol that unfolds over TIME and where the
+// interesting question is what becomes learnable AFTER an event (here: a diagnosis).
+// It shows the two idioms for that:
+//   - a HASH ratchet of daily secret keys: SK[n+1] = HASH(SK[n]), with EphIDs = HKDF(...)
+//   - phase[1] marks "day 15": Alice tests positive and publishes SK1A upstream
+//
+// More than two principals: five roles (SmartphoneA/B/C, BackendServer,
+// HealthCareAuthority). Principals appear in multiple blocks — Verifpal accumulates
+// each principal's state across its blocks. Message-passing only; no shared state.
+//
+// Expected result: EphID02A (generated 15 days before the test) stays confidential,
+// but every EphID from day 1 onward (EphID1xA, EphID2xA) becomes recoverable once SK1A
+// is published — exactly the "notify contacts without revealing identity" tradeoff.
+
+attacker[active]
+
+// --- Day 0: setup. Each phone derives its EphIDs from a fresh daily secret key. ---
+principal SmartphoneA[
+	knows public BroadcastKey
+	generates SK0A
+	EphID00A, EphID01A, EphID02A = HKDF(nil, SK0A, BroadcastKey)
+]
+
+principal SmartphoneB[
+	knows public BroadcastKey
+	generates SK0B
+	EphID00B, EphID01B, EphID02B = HKDF(nil, SK0B, BroadcastKey)
+]
+
+principal SmartphoneC[
+	knows public BroadcastKey
+	generates SK0C
+	EphID00C, EphID01C, EphID02C = HKDF(nil, SK0C, BroadcastKey)
+]
+
+// Proximity contacts: A<->B, then C<->B.
+SmartphoneA -> SmartphoneB: EphID00A
+SmartphoneB -> SmartphoneA: EphID00B
+SmartphoneC -> SmartphoneB: EphID01C
+SmartphoneB -> SmartphoneC: EphID01B
+
+// --- Day 1: server publishes SK values of infected patients (none yet). ---
+principal BackendServer[
+	knows private infectedPatients0
+]
+
+BackendServer -> SmartphoneA: infectedPatients0
+BackendServer -> SmartphoneB: infectedPatients0
+BackendServer -> SmartphoneC: infectedPatients0
+
+// New day => ratchet the daily secret key forward and regenerate EphIDs.
+principal SmartphoneA[
+	SK1A = HASH(SK0A)
+	EphID10A, EphID11A, EphID12A = HKDF(nil, SK1A, BroadcastKey)
+]
+
+principal SmartphoneB[
+	SK1B = HASH(SK0B)
+	EphID10B, EphID11B, EphID12B = HKDF(nil, SK1B, BroadcastKey)
+]
+
+principal SmartphoneC[
+	SK1C = HASH(SK0C)
+	EphID10C, EphID11C, EphID12C = HKDF(nil, SK1C, BroadcastKey)
+]
+
+// --- Day 2 (only Alice needed for the queries). ---
+principal SmartphoneA[
+	SK2A = HASH(SK1A)
+	EphID20A, EphID21A, EphID22A = HKDF(nil, SK2A, BroadcastKey)
+]
+
+// --- Day 15: Alice tests positive. New phase = key material learnable from here on. ---
+phase[1]
+
+principal HealthCareAuthority[
+	generates triggerToken
+	knows private ephemeral_sk
+	m1 = ENC(ephemeral_sk, triggerToken)
+]
+
+HealthCareAuthority -> BackendServer: [m1]
+HealthCareAuthority -> SmartphoneA: m1
+
+principal SmartphoneA[
+	knows private ephemeral_sk
+	m1_dec = DEC(ephemeral_sk, m1)
+	m2 = AEAD_ENC(ephemeral_sk, SK1A, m1_dec)
+]
+
+SmartphoneA -> BackendServer: m2
+
+principal BackendServer[
+	knows private ephemeral_sk
+	m2_dec = AEAD_DEC(ephemeral_sk, m2, DEC(ephemeral_sk, m1))?
+	infectedPatients1 = CONCAT(infectedPatients0, m2_dec)
+]
+
+BackendServer -> SmartphoneA: infectedPatients1
+BackendServer -> SmartphoneB: infectedPatients1
+BackendServer -> SmartphoneC: infectedPatients1
+
+queries[
+	// A value shared 15 days before the test must NOT become linkable:
+	confidentiality? EphID02A
+	// Contacts SHOULD be able to recompute Alice's EphIDs from day 1 onward:
+	confidentiality? EphID10A
+	confidentiality? EphID11A
+	confidentiality? EphID12A
+	confidentiality? EphID20A
+	confidentiality? EphID21A
+	confidentiality? EphID22A
+	// Can the server authenticate Alice as the sender of m2?
+	authentication? SmartphoneA -> BackendServer: m2
+]

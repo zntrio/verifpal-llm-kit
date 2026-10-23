@@ -1,0 +1,128 @@
+// Signal secure messaging — X3DH authenticated key exchange + Double Ratchet,
+// three messages, then a post-session long-term key leak in phase[1]. (Manual ch. 5.)
+//
+// This is the DEFAULT reference for a two-party session protocol with:
+//   - long-term identity keys (signing + DH), guarded to model mutual pre-authentication
+//   - ephemeral keys mixed per message (the ratchet) for forward secrecy
+//   - a CHECKED SIGNVERIF on Bob's signed pre-key (session aborts if it fails)
+//   - CHECKED AEAD_DEC on every received message (m1_d/m2_d/m3_d end with `?`). This is
+//     REQUIRED for the authentication? queries to hold: an unchecked AEAD_DEC "uses" whatever
+//     ciphertext arrives, so the attacker can inject one and break authentication. Drop a `?`
+//     from any message decryption and Verifpal immediately reports an auth attack on that e_i.
+//   - AEAD associated data = HASH of the session public keys (channel binding)
+//   - phases: leaking long-term keys AFTER the session tests forward secrecy
+//
+// ANALYZED with verifpal 0.52.0 (see examples/README.md "Validation" for the divergence from
+// the manual's older-engine narrative):
+//   - confidentiality? m1, m2, m3  -> PASS  (secret even with long-term keys leaked in phase[1]:
+//                                            forward secrecy holds, as the manual describes)
+//   - authentication? Bob -> Alice: e2, Alice -> Bob: e3  -> PASS
+//   - authentication? Alice -> Bob: e1  -> reported as a CONTRADICTION by 0.52.0 (a
+//     cross-session / non-injective-agreement replay on the first message; the manual's prose
+//     reports the whole model clean, but that narrative predates the engine redesign noted in
+//     the manual's own Notes). Verifpal authentication is non-injective (verifpal-lang
+//     guidelines/queries.md) — this is the tool teaching exactly that limit.
+// Experiments the manual walks through (still instructive to run):
+//   - unguard gblongterm  -> full mayor-in-the-middle; confidentiality collapses too
+//   - drop a `?` from a message AEAD_DEC -> that message's authentication breaks immediately
+
+attacker[active]
+
+principal Alice[
+	knows public c0, c1, c2, c3, c4
+	knows private alongterm
+	galongterm = G^alongterm
+]
+
+principal Bob[
+	knows public c0, c1, c2, c3, c4
+	knows private blongterm, bs
+	generates bo
+	gblongterm = G^blongterm
+	gbs = G^bs
+	gbo = G^bo
+	gbssig = SIGN(blongterm, gbs)
+]
+
+Bob -> Alice: [gblongterm], gbssig, gbs, gbo
+
+principal Alice[
+	generates ae1
+	gae1 = G^ae1
+	amaster = HASH(c0, gbs^alongterm, gblongterm^ae1, gbs^ae1, gbo^ae1)
+	arkba1, ackba1 = HKDF(amaster, c1, c2)
+]
+
+principal Alice[
+	generates m1, ae2
+	gae2 = G^ae2
+	valid = SIGNVERIF(gblongterm, gbs, gbssig)?
+	akshared1 = gbs^ae2
+	arkab1, ackab1 = HKDF(akshared1, arkba1, c2)
+	akenc1, akenc2 = HKDF(MAC(ackab1, c3), c1, c4)
+	e1 = AEAD_ENC(akenc1, m1, HASH(galongterm, gblongterm, gae2))
+]
+
+Alice -> Bob: [galongterm], gae1, gae2, e1
+
+principal Bob[
+	bmaster = HASH(c0, galongterm^bs, gae1^blongterm, gae1^bs, gae1^bo)
+	brkba1, bckba1 = HKDF(bmaster, c1, c2)
+]
+
+principal Bob[
+	bkshared1 = gae2^bs
+	brkab1, bckab1 = HKDF(bkshared1, brkba1, c2)
+	bkenc1, bkenc2 = HKDF(MAC(bckab1, c3), c1, c4)
+	m1_d = AEAD_DEC(bkenc1, e1, HASH(galongterm, gblongterm, gae2))?
+]
+
+principal Bob[
+	generates m2, be
+	gbe = G^be
+	bkshared2 = gae2^be
+	brkba2, bckba2 = HKDF(bkshared2, brkab1, c2)
+	bkenc3, bkenc4 = HKDF(MAC(bckba2, c3), c1, c4)
+	e2 = AEAD_ENC(bkenc3, m2, HASH(gblongterm, galongterm, gbe))
+]
+
+Bob -> Alice: gbe, e2
+
+principal Alice[
+	akshared2 = gbe^ae2
+	arkba2, ackba2 = HKDF(akshared2, arkab1, c2)
+	akenc3, akenc4 = HKDF(MAC(ackba2, c3), c1, c4)
+	m2_d = AEAD_DEC(akenc3, e2, HASH(gblongterm, galongterm, gbe))?
+]
+
+principal Alice[
+	generates m3, ae3
+	gae3 = G^ae3
+	akshared3 = gbe^ae3
+	arkab3, ackab3 = HKDF(akshared3, arkba2, c2)
+	akenc5, akenc6 = HKDF(MAC(ackab3, c3), c1, c4)
+	e3 = AEAD_ENC(akenc5, m3, HASH(gblongterm, galongterm, gae3))
+]
+
+Alice -> Bob: gae3, e3
+
+principal Bob[
+	bkshared3 = gae3^be
+	brkab3, bckab3 = HKDF(bkshared3, brkba2, c2)
+	bkenc5, bkenc6 = HKDF(MAC(bckab3, c3), c1, c4)
+	m3_d = AEAD_DEC(bkenc5, e3, HASH(gblongterm, galongterm, gae3))?
+]
+
+phase[1]
+
+principal Alice[leaks alongterm]
+principal Bob[leaks blongterm]
+
+queries[
+	confidentiality? m1
+	authentication? Alice -> Bob: e1
+	confidentiality? m2
+	authentication? Bob -> Alice: e2
+	confidentiality? m3
+	authentication? Alice -> Bob: e3
+]

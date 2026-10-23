@@ -1,0 +1,126 @@
+// Secure Scuttlebutt authenticated key exchange. (Manual ch. 6.)
+//
+// Read this when a protocol has a PRE-SHARED SYMMETRIC KEY as well as public keys.
+// Here `n` (the "network identifier") is a private pre-known symmetric value shared by
+// Alice and Bob but not the attacker — it acts as a PSK woven into every derived key.
+// Contrast with Signal, where authentication rests on guarded public keys alone.
+//
+// Security goals modelled: initiator identity hiding (longTermAPub stays secret),
+// message confidentiality, network-identifier hiding, forward secrecy.
+//
+// ANALYZED with verifpal 0.52.0 (see examples/README.md "Validation"):
+//   - confidentiality? m1, m2, longTermAPub  -> PASS  (messages secret AND initiator identity
+//     hidden — the network identifier n acts as a PSK, exactly as the manual describes)
+//   - authentication? (all five)  -> reported as CONTRADICTIONS by 0.52.0, via cross-session
+//     replay ("In another session:" in the trace). The manual's prose reports the initial
+//     model clean; that narrative predates the engine redesign the manual's Notes mention.
+//     Verifpal authentication is non-injective and the active attacker runs unbounded sessions
+//     (verifpal-lang guidelines/{queries,analysis}.md), so replay-style auth contradictions are
+//     expected here — a faithful demonstration of that boundary.
+// Experiments the manual walks through (still instructive to run):
+//   - make n public  -> confidentiality of longTermAPub ALSO collapses; the PSK was load-bearing
+//   - leak longTermA after m1 (keep n private)  -> messages stay secret: forward secrecy holds
+//
+// NOTE: `null` here is an ordinary public constant used as AEAD associated data, not a
+// keyword. `n` being both "known to all users" yet "unknown to the attacker" is an
+// idealization the manual flags as debatable — a good lesson in the "Are You Sure It's
+// Private?" caution.
+
+attacker[active]
+
+principal Alice[
+	knows public null
+	knows private n
+	knows private longTermA
+	generates ephemeralA
+	longTermAPub = G^longTermA
+	ephemeralAPub = G^ephemeralA
+]
+
+principal Bob[
+	knows public null
+	knows private n
+	knows private longTermB
+	generates ephemeralB
+	longTermBPub = G^longTermB
+	ephemeralBPub = G^ephemeralB
+]
+
+Bob -> Alice: [longTermBPub]
+
+principal Alice[
+	nMacAlice = MAC(n, ephemeralAPub)
+]
+
+Alice -> Bob: ephemeralAPub, nMacAlice
+
+principal Bob[
+	nMacAliceValid = ASSERT(MAC(n, ephemeralAPub), nMacAlice)?
+	nMacBob = MAC(n, ephemeralBPub)
+]
+
+Bob -> Alice: ephemeralBPub, nMacBob
+
+principal Alice[
+	nMacBobValid = ASSERT(MAC(n, ephemeralBPub), nMacBob)?
+	ephemeralSecretAlice = ephemeralBPub^ephemeralA
+	longTermSecretAlice = longTermBPub^ephemeralA
+	masterSecret1Alice = HASH(n, ephemeralSecretAlice, longTermSecretAlice)
+	sig1Alice = SIGN(longTermA, HASH(n, longTermBPub, ephemeralSecretAlice))
+	secretBox1Alice = AEAD_ENC(masterSecret1Alice, sig1Alice, null)
+	secretBox2Alice = AEAD_ENC(masterSecret1Alice, longTermAPub, null)
+	longEphemeralSecretAlice = ephemeralBPub^longTermA
+	masterSecret2Alice = HASH(n, ephemeralSecretAlice, longTermSecretAlice, longEphemeralSecretAlice)
+]
+
+Alice -> Bob: secretBox1Alice, secretBox2Alice
+
+principal Bob[
+	ephemeralSecretBob = ephemeralAPub^ephemeralB
+	longTermSecretBob = ephemeralAPub^longTermB
+	masterSecret1Bob = HASH(n, ephemeralSecretBob, longTermSecretBob)
+	sig1Bob = AEAD_DEC(masterSecret1Bob, secretBox1Alice, null)?
+	longTermAPub_Bob = AEAD_DEC(masterSecret1Bob, secretBox2Alice, null)?
+	sig1Valid = SIGNVERIF(longTermAPub_Bob, HASH(n, longTermBPub, ephemeralSecretBob), sig1Bob)?
+	longEphemeralSecretBob = longTermAPub_Bob^ephemeralB
+]
+
+principal Bob[
+	sig2Bob = SIGN(longTermB, HASH(n, sig1Bob, longTermAPub_Bob, ephemeralSecretBob))
+	masterSecret2Bob = HASH(n, ephemeralSecretBob, longTermSecretBob, longEphemeralSecretBob)
+	secretBox1Bob = AEAD_ENC(masterSecret2Bob, sig2Bob, null)
+]
+
+Bob -> Alice: secretBox1Bob
+
+principal Alice[
+	knows private m1
+	sig2Alice = AEAD_DEC(masterSecret2Alice, secretBox1Bob, null)?
+	sig2Valid = SIGNVERIF(longTermBPub, HASH(n, sig1Alice, longTermAPub, ephemeralSecretAlice), sig2Alice)?
+	secretBoxM1Alice = AEAD_ENC(masterSecret2Alice, m1, null)
+]
+
+Alice -> Bob: secretBoxM1Alice
+
+principal Bob[
+	knows private m2
+	m1Bob = AEAD_DEC(masterSecret2Bob, secretBoxM1Alice, null)?
+	secretBoxM2Bob = AEAD_ENC(masterSecret2Bob, m2, null)
+]
+
+Bob -> Alice: secretBoxM2Bob
+
+principal Alice[
+	m2Alice = AEAD_DEC(masterSecret2Alice, secretBoxM2Bob, null)?
+]
+
+queries[
+	confidentiality? m1
+	confidentiality? m2
+	confidentiality? longTermAPub
+	authentication? Alice -> Bob: secretBox1Alice
+	authentication? Alice -> Bob: secretBox2Alice
+	authentication? Bob -> Alice: secretBox1Bob
+	authentication? Alice -> Bob: secretBoxM1Alice
+	authentication? Bob -> Alice: secretBoxM2Bob
+]
